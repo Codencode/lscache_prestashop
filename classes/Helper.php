@@ -396,6 +396,9 @@ class LiteSpeedCacheHelper
 
     public static function licenseEnabled()
     {
+        //TODO <cnc-notice> ===== litespeedcache ===== - LiteSpeedCacheHelper::licenseEnabled() - qui il sistema capisce se è attivo litespeed
+        return true;
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // possible string "on,crawler,esi", will enforce checking in future
         return (isset($_SERVER['X-LSCACHE']) && $_SERVER['X-LSCACHE']) // for lsws
                 || (isset($_SERVER['HTTP_X_LSCACHE']) && $_SERVER['HTTP_X_LSCACHE']);  // lslb

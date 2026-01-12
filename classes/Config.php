@@ -686,6 +686,7 @@ class LiteSpeedCacheConfig
 
     public function getReservedHooks()
     {
+        //TODO <cnc-notice> ===== litespeedcache ===== - Config::getReservedHooks() - qui ci sono tutti gli hook a cui il modulo è innsestato
         $hooks = [
             /* global * */
             'actionDispatcher', // check cacheable for route

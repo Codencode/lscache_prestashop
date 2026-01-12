@@ -247,6 +247,7 @@ class LiteSpeedCacheCore
     
     private function addCacheTag($tag)
     {
+        //TODO <cnc-notice> ===== litespeedcache ===== - LiteSpeedCacheCore::addCacheTag() - qui il sistema aggiunge i TAG
         if (!in_array($tag, $this->cacheTags)) {
             $this->cacheTags[] = $tag;
             
@@ -519,6 +520,7 @@ class LiteSpeedCacheCore
         if (!$category->is_root_category) {
             $cats = $category->getParentsCategories();
             if (!empty($cats)) {
+                //TODO <cnc-notice> ===== litespeedcache ===== - LiteSpeedCacheCore::getPurgeTagsByCategory() - <<<<<<<<<< PROBLEMA >>>>>>>>>>: $catid è un array, che contiene id_category
                 foreach ($cats as $catid) {
                     $tags['pub'][] = Conf::TAG_PREFIX_CATEGORY . $catid;
                 }
@@ -781,6 +783,7 @@ class LiteSpeedCacheCore
 
     public function setCacheControlHeader()
     {
+        //TODO <cnc-notice> ===== litespeedcache ===== - LiteSpeedCacheCore::setCacheControlHeader() - qui vengono inviati gli header della cache
         if (headers_sent()) {
             return;
         }

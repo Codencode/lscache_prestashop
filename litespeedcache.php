@@ -300,6 +300,7 @@ class LiteSpeedCache extends Module
     // this is catchall function for purge events
     public function __call($method, $args)
     {
+        //TODO <cnc-notice> ===== litespeedcache ===== - LiteSpeedCache::__call() - qui il sistema esegue il purge della cache
         if (self::isActive()) {
             $keys = array_keys($args);
             if (count($keys) == 1 && $keys[0] == 0) {
