@@ -954,4 +954,9 @@ class LiteSpeedCache extends Module
 
         return $definedtabs;
     }
+
+    public function getCache()
+    {// TODO <cnc-notice> ===== NUOVI METODI ===== - getCache() - 
+        return $this->cache;
+    }
 }
