@@ -43,6 +43,18 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
             LSLog::log('In ESI controller display', LSLog::LEVEL_ESI_INCLUDE);
         }
 
+        //TODO <cnc-notice> ===== litespeedcache ===== - LiteSpeedCacheEsiModuleFrontController::display() - istruzioni per log controller Esi
+        $filePath = _PS_MODULE_DIR_ . 'litespeedcache' . DIRECTORY_SEPARATOR . 'controllers' . DIRECTORY_SEPARATOR . 'front' . DIRECTORY_SEPARATOR . '_log_esi_controller.log';
+        $stream = fopen($filePath,'a+');
+        $message = '-------------------------------------------------------------' . PHP_EOL;
+        $message .= '[' . date('Y-m-d H:i:s') . ']' . PHP_EOL;
+        $message .= '-------------------------------------------------------------' . PHP_EOL;
+        $message .= print_r($_REQUEST, true) . PHP_EOL . PHP_EOL;
+
+        fwrite($stream, $message);
+        fclose($stream);
+        /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
         $lsc = Module::getInstanceByName(LiteSpeedCache::MODULE_NAME);
         $html = '';
 
