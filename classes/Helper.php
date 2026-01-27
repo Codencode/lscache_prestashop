@@ -63,6 +63,7 @@ class LiteSpeedCacheHelper
         self::$internal['tag_shared_priv'] = 'public:' . $prefix . '_PRIV'; // in private cache, use public:prefix_PRIV
 
         if (LiteSpeedCache::canInjectEsi() || LiteSpeedCache::isCacheable() || LiteSpeedCache::isEsiRequest()) {
+             //TODO <cnc-notice> ===== litespeedcache ===== - LiteSpeedCacheHelper::initInternals() - qui il sistema crea l'url del controller "esi.php"
             // For some purge events, it may not load from dispatcher, getModuleLink will fail
             $esiurl = $ctx->link->getModuleLink(LiteSpeedCache::MODULE_NAME, 'esi', $defaultParam);
             self::$internal['esi_base_url'] = self::getRelativeUri($esiurl);
