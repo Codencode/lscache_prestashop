@@ -32,6 +32,8 @@ require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/DebugLog.php';
 require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/Config.php';
 require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/Cache.php';
 require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/VaryCookie.php';
+require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/DynamicFragment.php';
+require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/DynamicFragmentParser.php';
 
 class LiteSpeedCache extends Module
 {
@@ -73,6 +75,16 @@ class LiteSpeedCache extends Module
     private $config;
 
     private $esiInjection;
+
+    /**
+     * A notification makes the current response potentially private.
+     *
+     * Do not immediately disable the full-page cache: a compatible theme may
+     * expose the whole notifications block through data-ps-fragment and let us
+     * isolate it as ESI. The legacy no-cache behavior is applied later, in the
+     * output filter, only if that fragment cannot actually be replaced.
+     */
+    private $hasPrivateNotification = false;
 
     private static $ccflag = 0; // cache control flag
 
@@ -228,12 +240,29 @@ class LiteSpeedCache extends Module
 
     public function hookOverrideLayoutTemplate($params)
     {
-        if (self::isCacheable()) {
-            if ($this->cache->hasNotification()) {
-                $this->setNotCacheable('Has private notification');
-            } elseif ((self::$ccflag & self::CCBM_ESI_REQ) == 0) {
-                $this->cache->initCacheTagsByController($params);
-            }
+        if (!self::isCacheable()) {
+            return;
+        }
+
+        /*
+        * Keep the existing notification safety check, but postpone the
+        * no-cache decision until callbackOutputFilter().
+        *
+        * At this point the final HTML is not available yet, so we cannot know
+        * whether the active theme exposes data-ps-fragment="notifications".
+        * If the fragment is successfully replaced with ESI later, only the
+        * notifications block is dynamic and the page itself may stay cacheable.
+        * Otherwise the old "Has private notification" behavior is preserved.
+        *
+        * Hummingbird support:
+        * https://github.com/PrestaShop/hummingbird/pull/1101
+        */
+        if ($this->cache->hasNotification()) {
+            $this->hasPrivateNotification = true;
+        }
+
+        if ((self::$ccflag & self::CCBM_ESI_REQ) == 0) {
+            $this->cache->initCacheTagsByController($params);
         }
     }
 
@@ -522,6 +551,33 @@ class LiteSpeedCache extends Module
             $lsc->setNotCacheable('Response code is ' . $code);
         }
 
+        $replacedDynamicFragments = [];
+
+        /*
+         * Inspect dynamic fragments whenever the response is still eligible for
+         * FPC, even when ESI injection is unavailable. A data-ps-fragment block
+         * that cannot be isolated must never be stored as static public HTML.
+         */
+        if (self::isCacheable()) {
+            $buffer = $lsc->replaceDynamicFragments($buffer, $replacedDynamicFragments);
+        }
+
+        /*
+        * Preserve the previous safety behavior for themes that do not expose
+        * notifications as a supported dynamic fragment, or when ESI injection
+        * is unavailable/failed.
+        *
+        * Only a fragment that was actually replaced is considered handled.
+        *
+        * Hummingbird support:
+        * https://github.com/PrestaShop/hummingbird/pull/1101
+        */
+        if (self::isCacheable()
+            && $lsc->hasPrivateNotification
+            && empty($replacedDynamicFragments[LiteSpeedCacheDynamicFragment::NOTIFICATIONS])) {
+            $lsc->setNotCacheable('Has private notification');
+        }
+
         if (self::canInjectEsi()
             && (count($lsc->esiInjection['marker']) || self::isCacheable())) {
             // if no injection, but cacheable, still need to check token
@@ -533,6 +589,146 @@ class LiteSpeedCache extends Module
          * //  $tname = tempnam('/tmp/t','A');
          * //  file_put_contents($tname, $buffer);
          */
+        return $buffer;
+    }
+
+    private function replaceDynamicFragments($buffer, &$replacedFragments)
+    {
+        $parseErrors = [];
+        $fragments = LiteSpeedCacheDynamicFragmentParser::find($buffer, $parseErrors);
+
+        if (!empty($parseErrors)) {
+            /*
+             * data-ps-fragment explicitly marks content as dynamic. If its HTML
+             * boundaries are ambiguous, caching the original block would be less
+             * safe than disabling FPC for the current response.
+             */
+            $this->setNotCacheable('Invalid dynamic fragment markup');
+
+            if (_LITESPEED_DEBUG_ >= LiteSpeedCacheLog::LEVEL_UNEXPECTED) {
+                LiteSpeedCacheLog::log(
+                    __FUNCTION__ . ' ' . implode('; ', $parseErrors),
+                    LiteSpeedCacheLog::LEVEL_UNEXPECTED
+                );
+            }
+
+            return $buffer;
+        }
+
+        if (empty($fragments)) {
+            return $buffer;
+        }
+
+        $product = false;
+        if ($this->context && $this->context->smarty) {
+            $product = $this->context->smarty->getTemplateVars('product');
+        }
+
+        if (empty($product)
+            && $this->context
+            && $this->context->controller
+            && method_exists($this->context->controller, 'getProduct')) {
+            $product = $this->context->controller->getProduct();
+        }
+
+        $replaced = false;
+
+        /*
+         * Replace from the end of the document to the beginning so the offsets
+         * returned by the parser remain valid after each substr_replace().
+         */
+        foreach (array_reverse($fragments) as $fragment) {
+            if (!LiteSpeedCacheDynamicFragment::isSupported($fragment['name'])) {
+                /*
+                 * Unknown data-ps-fragment values are still declared dynamic by
+                 * the theme. Do not silently store them as public static HTML.
+                 */
+                $this->setNotCacheable('Unsupported dynamic fragment: ' . $fragment['name']);
+
+                if (_LITESPEED_DEBUG_ >= LiteSpeedCacheLog::LEVEL_UNEXPECTED) {
+                    LiteSpeedCacheLog::log(
+                        __FUNCTION__ . ' unsupported fragment ' . $fragment['name'],
+                        LiteSpeedCacheLog::LEVEL_UNEXPECTED
+                    );
+                }
+
+                continue;
+            }
+
+            if (!self::canInjectEsi()) {
+                $this->setNotCacheable('Dynamic fragment requires ESI: ' . $fragment['name']);
+                continue;
+            }
+
+            $esiParam = LiteSpeedCacheDynamicFragment::buildEsiParam($fragment['name'], $product);
+            if ($esiParam == null) {
+                $this->setNotCacheable('Unable to build dynamic fragment: ' . $fragment['name']);
+                continue;
+            }
+
+            $conf = $this->config->canInjectEsi(LscDynamicFragment::NAME, $esiParam);
+            if ($conf == false) {
+                $this->setNotCacheable('Unable to inject dynamic fragment: ' . $fragment['name']);
+                continue;
+            }
+
+            $item = new LiteSpeedCacheEsiItem($esiParam, $conf);
+
+            /*
+             * Notifications may already contain a controller/module message in
+             * the current MISS response. Keep that exact HTML as ESI inline
+             * content so converting the block to ESI does not make the current
+             * notification disappear.
+             *
+             * product-add-to-cart is intentionally not inlined here because it
+             * may already contain LiteSpeed ESI markers (for example hooks
+             * rendered inside that template). Replacing the whole node directly
+             * avoids nested ESI markers in the cached page.
+             */
+            if ($fragment['name'] === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
+                $originalFragment = substr($buffer, $fragment['start'], $fragment['length']);
+                $item->setContent($originalFragment);
+            } else {
+                LiteSpeedCacheHelper::genEsiElements($item);
+            }
+
+            $esiInclude = $item->getInclude();
+            if ($esiInclude === false || $esiInclude === '') {
+                $this->setNotCacheable('Unable to generate dynamic fragment ESI: ' . $fragment['name']);
+                continue;
+            }
+
+            $id = $item->getId();
+            if (!isset($this->esiInjection['marker'][$id])) {
+                $this->esiInjection['marker'][$id] = $item;
+            }
+
+            $buffer = substr_replace(
+                $buffer,
+                $esiInclude,
+                $fragment['start'],
+                $fragment['length']
+            );
+
+            /*
+             * Record only fragments that were really converted to ESI. This is
+             * used by the deferred hasNotification() fallback above.
+             */
+            $replacedFragments[$fragment['name']] = true;
+            $replaced = true;
+
+            if (_LITESPEED_DEBUG_ >= LiteSpeedCacheLog::LEVEL_ESI_INCLUDE) {
+                LiteSpeedCacheLog::log(
+                    __FUNCTION__ . ' replaced fragment ' . $fragment['name'],
+                    LiteSpeedCacheLog::LEVEL_ESI_INCLUDE
+                );
+            }
+        }
+
+        if ($replaced) {
+            $this->setEsiOn();
+        }
+
         return $buffer;
     }
 

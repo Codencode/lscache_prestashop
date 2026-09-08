@@ -27,6 +27,8 @@ use LiteSpeedCacheHelper as LSHelper;
 use LiteSpeedCacheLog as LSLog;
 
 require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/HookParamsResolver.php';
+require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/DynamicFragment.php';
+require_once _PS_MODULE_DIR_ . 'litespeedcache/classes/DynamicFragmentProductPresenter.php';
 
 class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
 {
@@ -57,7 +59,6 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
 
             if (is_string($item) && _LITESPEED_DEBUG_ >= LSLog::LEVEL_EXCEPTION) {
                 LSLog::log('Invalid ESI url ' . $item, LSLog::LEVEL_EXCEPTION);
-
                 return;
             }
             $this->populateItemContent($item);
@@ -67,7 +68,6 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
                 if (_LITESPEED_DEBUG_ >= LSLog::LEVEL_EXCEPTION) {
                     LSLog::log('Invalid ESI url - module not found ', LSLog::LEVEL_EXCEPTION);
                 }
-
                 return;
             }
             $related = $item->getId();
@@ -90,7 +90,7 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
         }
         ob_clean();
         echo $inline . $html;
-        ob_end_flush();        
+        ob_end_flush();
     }
 
     private function populateItemContent($item)
@@ -104,6 +104,9 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
                 break;
             case EsiItem::ESI_SMARTYFIELD:
                 $this->processSmartyField($item);
+                break;
+            case EsiItem::ESI_DYNAMIC_FRAGMENT:
+                $this->processDynamicFragment($item);
                 break;
             case EsiItem::ESI_JSDEF:
                 LscIntegration::processJsDef($item);
@@ -129,7 +132,6 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
             $params['smarty'] = $this->context->smarty;
             $params['cookie'] = $this->context->cookie;
             $params['cart'] = $this->context->cart;
-
             $smarty = $params['smarty'];
             $urls = $smarty->getTemplateVars('urls');
             $currentUrl = $urls['current_url'];
@@ -137,7 +139,7 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
                 $urls['current_url'] = $urls['base_url'];
                 $urls = $this->context->smarty->getTemplateVars('urls');
                 $urls['current_url'] = $urls['base_url'];
-            }            
+            }
         }
 
         return $module;
@@ -182,7 +184,6 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
             }
 
             $method = $item->getParam('mt');
-
             $content = $module->$method($params);
 
             // Avoid empty ESI fragments: some hooks/modules may return NULL or empty content
@@ -205,10 +206,9 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
                 $mvs = explode('.', trim($mv));
                 if($mvs[0]!='smarty'){
                     if(!$mvs[1]){
-                        $params[$mvs[0]] = $mp1[$i];                        
+                        $params[$mvs[0]] = $mp1[$i];
                     } else {
                         if(isset($params[$mvs[0]])){
-
                             $params[$mvs[0]][$mvs[1]] = $mp1[$i];
                         } else {
                             $params[$mvs[0]] = [$mvs[1]=>$mp1[$i]];
@@ -244,7 +244,6 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
     {
         $item->setContent('');
     }
-
     private function processSmartyField($item)
     {
         $f = $item->getParam('f');
@@ -255,5 +254,126 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
         } else {
             LscIntegration::processModField($item);
         }
+    }
+    private function processDynamicFragment($item)
+    {
+        switch ($item->getParam('f')) {
+            case LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART:
+                $this->processProductAddToCartFragment($item);
+                break;
+            case LiteSpeedCacheDynamicFragment::NOTIFICATIONS:
+                $this->processNotificationsFragment($item);
+                break;
+            default:
+                $item->setFailed('Unknown dynamic fragment ' . $item->getParam('f'));
+        }
+    }
+    private function processProductAddToCartFragment($item)
+    {
+        $product = $this->getPresentedProductFromItem($item);
+        if ($product == null) {
+            $item->setFailed('Missing product for add to cart fragment');
+            return;
+        }
+
+        $this->assignGeneralPurposeVariables();
+        $this->context->smarty->assign('product', $product);
+        $item->setContent($this->fetchThemeTemplate('catalog/_partials/product-add-to-cart.tpl'));
+    }
+    private function processNotificationsFragment($item)
+    {
+        /*
+         * The fragment is global. Reuse FrontController::prepareNotifications()
+         * when available so redirect/session notifications are consumed with the
+         * same mechanism used by normal PrestaShop page rendering.
+         *
+         * The current MISS response is also preserved as ESI inline content by
+         * replaceDynamicFragments(). This protects notifications generated by
+         * the original page request that a standalone ESI request cannot
+         * reconstruct generically.
+         */
+        $notifications = $this->prepareDynamicFragmentNotifications();
+        $idProduct = (int) $item->getParam('id_product');
+        if ($idProduct > 0 && (bool) Configuration::get('PS_DISPLAY_AMOUNT_IN_CART')) {
+            $quantities = $this->context->cart->getProductQuantityInAllVariants($idProduct);
+            $message = null;
+            if ($quantities['standalone_quantity'] > 0 && $quantities['pack_quantity'] > 0) {
+                $message = $this->trans(
+                    'Your cart contains %1s of these products and another %2s of these are included in packs in your cart.',
+                    [$quantities['standalone_quantity'], $quantities['pack_quantity']],
+                    'Shop.Theme.Catalog'
+                );
+            } elseif ($quantities['standalone_quantity'] > 0) {
+                $message = $this->trans(
+                    'Your cart contains %1s of these products.',
+                    [$quantities['standalone_quantity']],
+                    'Shop.Theme.Catalog'
+                );
+            } elseif ($quantities['pack_quantity'] > 0) {
+                $message = $this->trans(
+                    '%1s of these products are included in packs in your cart.',
+                    [$quantities['pack_quantity']],
+                    'Shop.Theme.Catalog'
+                );
+            }
+            if ($message !== null && !in_array($message, $notifications['info'], true)) {
+                $notifications['info'][] = $message;
+            }
+        }
+
+        $this->assignGeneralPurposeVariables();
+        $product = $this->getPresentedProductFromItem($item);
+        if ($product != null) {
+            $this->context->smarty->assign('product', $product);
+        }
+        $this->context->smarty->assign('notifications', $notifications);
+        $content = $this->fetchThemeTemplate('_partials/notifications.tpl');
+        $item->setContent($content);
+    }
+
+    private function prepareDynamicFragmentNotifications()
+    {
+        $notifications = [
+            'error' => [],
+            'warning' => [],
+            'success' => [],
+            'info' => [],
+        ];
+        /*
+         * PrestaShop 1.7+ exposes prepareNotifications() on FrontController.
+         * method_exists() keeps this integration compatible with older versions
+         * supported by the LiteSpeed module.
+         */
+        if (method_exists($this, 'prepareNotifications')) {
+            $prepared = $this->prepareNotifications();
+            if (is_array($prepared)) {
+                foreach ($notifications as $type => $messages) {
+                    if (isset($prepared[$type]) && is_array($prepared[$type])) {
+                        $notifications[$type] = $prepared[$type];
+                    }
+                }
+            }
+        }
+
+        return $notifications;
+    }
+
+    private function getPresentedProductFromItem($item)
+    {
+        $presenter = new LiteSpeedCacheDynamicFragmentProductPresenter($this->context);
+
+        return $presenter->present(
+            (int) $item->getParam('id_product'),
+            (int) $item->getParam('id_product_attribute'),
+            (int) Tools::getValue('quantity_wanted', 1)
+        );
+    }
+
+    private function fetchThemeTemplate($template)
+    {
+        if (substr($template, -4) == '.tpl') {
+            $template = substr($template, 0, -4);
+        }
+        return $this->context->smarty->fetch($this->getTemplateFile($template));
     }
 }
