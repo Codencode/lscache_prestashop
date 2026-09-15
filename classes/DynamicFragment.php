@@ -17,7 +17,7 @@
 class LiteSpeedCacheDynamicFragment
 {
     const PRODUCT_ADD_TO_CART = 'product-add-to-cart';
-
+    const PRODUCT_ADD_TO_CART_REFRESH = 'product_add_to_cart';
     const NOTIFICATIONS = 'notifications';
 
     public static function isSupported($name)
@@ -25,41 +25,56 @@ class LiteSpeedCacheDynamicFragment
         return in_array($name, self::getSupportedNames(), true);
     }
 
-    public static function buildEsiParam($name, $product)
+    public static function buildEsiParam($name)
     {
         if (!self::isSupported($name)) {
             return null;
         }
 
-        /*
-         * notifications is a global fragment and may exist on pages without a
-         * product context.
-         *
-         * product-add-to-cart cannot be rebuilt without a product and must not
-         * be converted to ESI when no valid product is available.
-         */
-        $idProduct = self::getProductId($product);
-        if ($name === self::PRODUCT_ADD_TO_CART && $idProduct <= 0) {
+        // product-add-to-cart is handled directly by ProductController.
+        if ($name === self::PRODUCT_ADD_TO_CART) {
             return null;
         }
 
-        $params = [
+        return [
             'pt' => LiteSpeedCacheEsiItem::ESI_DYNAMIC_FRAGMENT,
             'm' => LscDynamicFragment::NAME,
             'f' => $name,
         ];
+    }
 
-        if ($idProduct > 0) {
-            $params['id_product'] = $idProduct;
-            $params['id_product_attribute'] = (int) self::getProductValue($product, 'id_product_attribute');
+    /**
+     * Build the parameters required by ProductController::displayAjaxRefresh()
+     * for a supported product-page fragment, preserving the current product
+     * and selected combination context.
+     */
+    public static function buildProductRefreshParam($product, $fragment)
+    {
+        if (!in_array($fragment, [
+            self::PRODUCT_ADD_TO_CART,
+            self::NOTIFICATIONS,
+        ], true)) {
+            return null;
         }
 
-        /*
-         * Do not put id_customization in the ESI URL stored in the public FPC.
-         * Customization data is user/cart-specific and must be derived from the
-         * current ESI request context instead.
-         */
-        return $params;
+        $idProduct = self::getProductId($product);
+
+        if ($idProduct <= 0) {
+            return null;
+        }
+
+        return [
+            'id_product' => $idProduct,
+            'id_product_attribute' => (int) self::getProductValue(
+                $product,
+                'id_product_attribute'
+            ),
+            'ajax' => 1,
+            'action' => 'refresh',
+            'lscache_fragment' => $fragment === self::PRODUCT_ADD_TO_CART
+                ? self::PRODUCT_ADD_TO_CART_REFRESH
+                : self::NOTIFICATIONS,
+        ];
     }
 
     private static function getSupportedNames()

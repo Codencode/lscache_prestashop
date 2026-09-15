@@ -136,7 +136,7 @@ class LiteSpeedCache extends Module
     
     public static function getVersion()
     {
-        return '1.6.0';
+        return '1.6.1';
     }
 
     public static function isActive()
@@ -417,6 +417,92 @@ class LiteSpeedCache extends Module
         }
     }
 
+    /**
+     * Reuses ProductController::displayAjaxRefresh() to render supported
+     * product-page dynamic fragments without duplicating PrestaShop core logic.
+     */
+    public function hookActionAjaxDieProductControllerdisplayAjaxRefreshBefore($params)
+    {
+        if (
+            (int) Tools::getValue('ajax') !== 1
+            || Tools::getValue('action') !== 'refresh'
+        ) {
+            return;
+        }
+
+        $fragment = Tools::getValue('lscache_fragment');
+
+        if ($fragment === LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH) {
+            $content = $this->getProductAddToCartFragment($params);
+        } elseif ($fragment === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
+            $content = $this->getProductNotificationsFragment();
+        } else {
+            return;
+        }
+
+        if ($content === null) {
+            return;
+        }
+
+        header('Content-Type: text/html; charset=utf-8');
+
+        // Since PrestaShop 8.1 the hook value is passed by reference.
+        // Older versions need to stop the AJAX response directly.
+        if (version_compare(_PS_VERSION_, '8.1.0', '<')) {
+            die($content);
+        }
+
+        $params['value'] = $content;
+    }
+
+    private function getProductAddToCartFragment($params)
+    {
+        // displayAjaxRefresh() already renders product_add_to_cart as part of
+        // its JSON response. Extract only that fragment for the ESI response.
+        if (empty($params['value'])) {
+            return null;
+        }
+
+        $data = json_decode($params['value'], true);
+        $key = LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH;
+
+        if (
+            !is_array($data)
+            || !isset($data[$key])
+        ) {
+            return null;
+        }
+
+        return $data[$key];
+    }
+
+    private function getProductNotificationsFragment()
+    {
+        // ProductController has already populated its notification arrays during
+        // initContent(), including product-specific cart quantity notifications.
+        $controller = $this->context->controller;
+
+        if (!$controller) {
+            return null;
+        }
+
+        $notifications = [
+            'error' => $controller->errors,
+            'warning' => $controller->warning,
+            'success' => $controller->success,
+            'info' => $controller->info,
+        ];
+
+        $this->context->smarty->assign(
+            'notifications',
+            $notifications
+        );
+
+        return $this->context->smarty->fetch(
+            '_partials/notifications.tpl'
+        );
+    }
+
     // called by Media override addJsDef
     public static function filterJsDef(&$jsDef)
     {
@@ -467,6 +553,24 @@ class LiteSpeedCache extends Module
             self::$ccflag |= self::CCBM_ESI_REQ;
 
             return 'esi request';
+        }
+
+        if (
+            $controllerClass == 'ProductController'
+            && in_array(
+                Tools::getValue('lscache_fragment'),
+                [
+                    LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH,
+                    LiteSpeedCacheDynamicFragment::NOTIFICATIONS,
+                ],
+                true
+            )
+            && (int) Tools::getValue('ajax') === 1
+            && Tools::getValue('action') === 'refresh'
+        ) {
+            self::$ccflag |= self::CCBM_ESI_REQ;
+
+            return 'product dynamic fragment esi request';
         }
 
         // here also check purge controller
@@ -633,16 +737,18 @@ class LiteSpeedCache extends Module
 
         $replaced = false;
 
-        /*
-         * Replace from the end of the document to the beginning so the offsets
-         * returned by the parser remain valid after each substr_replace().
-         */
+        $canUseProductRefresh = (
+            $this->context
+            && $this->context->controller
+            && method_exists($this->context->controller, 'displayAjaxRefresh')
+        );
+
+        // Replace from the end of the document to the beginning so the offsets
+        // returned by the parser remain valid after each substr_replace().
         foreach (array_reverse($fragments) as $fragment) {
             if (!LiteSpeedCacheDynamicFragment::isSupported($fragment['name'])) {
-                /*
-                 * Unknown data-ps-fragment values are still declared dynamic by
-                 * the theme. Do not silently store them as public static HTML.
-                 */
+                // Unknown data-ps-fragment values are still declared dynamic by
+                // the theme. Do not silently store them as public static HTML.
                 $this->setNotCacheable('Unsupported dynamic fragment: ' . $fragment['name']);
 
                 if (_LITESPEED_DEBUG_ >= LiteSpeedCacheLog::LEVEL_UNEXPECTED) {
@@ -660,47 +766,65 @@ class LiteSpeedCache extends Module
                 continue;
             }
 
-            $esiParam = LiteSpeedCacheDynamicFragment::buildEsiParam($fragment['name'], $product);
-            if ($esiParam == null) {
-                $this->setNotCacheable('Unable to build dynamic fragment: ' . $fragment['name']);
-                continue;
-            }
+            // Reuse ProductController rendering for product-related fragments
+            // Notifications without product context keep using the ESI fallback.
+            $useProductController = $canUseProductRefresh
+                && (
+                    $fragment['name'] === LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART
+                    || (
+                        $fragment['name'] === LiteSpeedCacheDynamicFragment::NOTIFICATIONS
+                        && !empty($product)
+                    )
+                );
 
-            $conf = $this->config->canInjectEsi(LscDynamicFragment::NAME, $esiParam);
-            if ($conf == false) {
-                $this->setNotCacheable('Unable to inject dynamic fragment: ' . $fragment['name']);
-                continue;
-            }
+            if ($useProductController) {
+                $esiInclude = $this->buildProductRefreshEsiInclude(
+                    $product,
+                    $fragment['name']
+                );
 
-            $item = new LiteSpeedCacheEsiItem($esiParam, $conf);
-
-            /*
-             * Notifications may already contain a controller/module message in
-             * the current MISS response. Keep that exact HTML as ESI inline
-             * content so converting the block to ESI does not make the current
-             * notification disappear.
-             *
-             * product-add-to-cart is intentionally not inlined here because it
-             * may already contain LiteSpeed ESI markers (for example hooks
-             * rendered inside that template). Replacing the whole node directly
-             * avoids nested ESI markers in the cached page.
-             */
-            if ($fragment['name'] === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
-                $originalFragment = substr($buffer, $fragment['start'], $fragment['length']);
-                $item->setContent($originalFragment);
+                if ($esiInclude === false || $esiInclude === '') {
+                    $this->setNotCacheable(
+                        'Unable to generate dynamic fragment ESI: ' . $fragment['name']
+                    );
+                    continue;
+                }
             } else {
-                LiteSpeedCacheHelper::genEsiElements($item);
-            }
+                $esiParam = LiteSpeedCacheDynamicFragment::buildEsiParam($fragment['name']);
+                if ($esiParam == null) {
+                    $this->setNotCacheable('Unable to build dynamic fragment: ' . $fragment['name']);
+                    continue;
+                }
 
-            $esiInclude = $item->getInclude();
-            if ($esiInclude === false || $esiInclude === '') {
-                $this->setNotCacheable('Unable to generate dynamic fragment ESI: ' . $fragment['name']);
-                continue;
-            }
+                $conf = $this->config->canInjectEsi(LscDynamicFragment::NAME, $esiParam);
+                if ($conf == false) {
+                    $this->setNotCacheable('Unable to inject dynamic fragment: ' . $fragment['name']);
+                    continue;
+                }
 
-            $id = $item->getId();
-            if (!isset($this->esiInjection['marker'][$id])) {
-                $this->esiInjection['marker'][$id] = $item;
+                $item = new LiteSpeedCacheEsiItem($esiParam, $conf);
+
+                // Notifications may already contain a controller/module message in
+                // the current MISS response. Keep that exact HTML as ESI inline
+                // content so converting the block to ESI does not make the current
+                // notification disappear.
+                if ($fragment['name'] === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
+                    $originalFragment = substr($buffer, $fragment['start'], $fragment['length']);
+                    $item->setContent($originalFragment);
+                } else {
+                    LiteSpeedCacheHelper::genEsiElements($item);
+                }
+
+                $esiInclude = $item->getInclude();
+                if ($esiInclude === false || $esiInclude === '') {
+                    $this->setNotCacheable('Unable to generate dynamic fragment ESI: ' . $fragment['name']);
+                    continue;
+                }
+
+                $id = $item->getId();
+                if (!isset($this->esiInjection['marker'][$id])) {
+                    $this->esiInjection['marker'][$id] = $item;
+                }
             }
 
             $buffer = substr_replace(
@@ -710,10 +834,8 @@ class LiteSpeedCache extends Module
                 $fragment['length']
             );
 
-            /*
-             * Record only fragments that were really converted to ESI. This is
-             * used by the deferred hasNotification() fallback above.
-             */
+            // Record only fragments that were really converted to ESI. This is
+            // used by the deferred hasNotification() fallback above.
             $replacedFragments[$fragment['name']] = true;
             $replaced = true;
 
@@ -730,6 +852,59 @@ class LiteSpeedCache extends Module
         }
 
         return $buffer;
+    }
+
+    /**
+    * Build an ESI include targeting ProductController::displayAjaxRefresh().
+    * The product combination and fragment parameters are passed through
+    * getProductLink() so the generated URL follows PrestaShop routing rules.
+    */
+    private function buildProductRefreshEsiInclude($product, $fragment)
+    {
+        $params = LiteSpeedCacheDynamicFragment::buildProductRefreshParam(
+            $product,
+            $fragment
+        );
+
+        if ($params == null || empty($params['id_product'])) {
+            return false;
+        }
+
+        $idProduct = (int) $params['id_product'];
+        $idProductAttribute = !empty($params['id_product_attribute'])
+            ? (int) $params['id_product_attribute']
+            : null;
+
+        unset(
+            $params['id_product'],
+            $params['id_product_attribute']
+        );
+
+        $url = $this->context->link->getProductLink(
+            $idProduct,
+            null,
+            null,
+            null,
+            null,
+            null,
+            $idProductAttribute,
+            false,
+            false,
+            false,
+            $params,
+            false
+        );
+
+        $relativeUrl = LiteSpeedCacheHelper::getRelativeUri($url);
+
+        if ($relativeUrl === false) {
+            return false;
+        }
+
+        return sprintf(
+            '<esi:include src=\'%s\' cache-control=\'no-cache\'/>',
+            $relativeUrl
+        );
     }
 
     private function registerEsiMarker($params, $conf)
@@ -1070,6 +1245,7 @@ class LiteSpeedCache extends Module
     private function installHooks()
     {
         $hooks = $this->config->getReservedHooks();
+
         foreach ($hooks as $hook) {
             if (!$this->registerHook($hook)) {
                 return false;
