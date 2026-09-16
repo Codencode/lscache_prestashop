@@ -432,8 +432,11 @@ class LiteSpeedCache extends Module
 
         $fragment = Tools::getValue('lscache_fragment');
 
-        if ($fragment === LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH) {
-            $content = $this->getProductAddToCartFragment($params);
+        if (in_array($fragment, [
+            LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH,
+            LiteSpeedCacheDynamicFragment::PRODUCT_ADDITIONAL_INFO_REFRESH,
+        ], true)) {
+            $content = $this->getProductRefreshFragment($params, $fragment);
         } elseif ($fragment === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
             $content = $this->getProductNotificationsFragment();
         } else {
@@ -455,16 +458,15 @@ class LiteSpeedCache extends Module
         $params['value'] = $content;
     }
 
-    private function getProductAddToCartFragment($params)
+    private function getProductRefreshFragment($params, $key)
     {
-        // displayAjaxRefresh() already renders product_add_to_cart as part of
-        // its JSON response. Extract only that fragment for the ESI response.
+        // displayAjaxRefresh() already renders product-page partials as part of
+        // its JSON response. Extract only the requested fragment for the ESI response.
         if (empty($params['value'])) {
             return null;
         }
 
         $data = json_decode($params['value'], true);
-        $key = LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH;
 
         if (
             !is_array($data)
@@ -561,6 +563,7 @@ class LiteSpeedCache extends Module
                 Tools::getValue('lscache_fragment'),
                 [
                     LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH,
+                    LiteSpeedCacheDynamicFragment::PRODUCT_ADDITIONAL_INFO_REFRESH,
                     LiteSpeedCacheDynamicFragment::NOTIFICATIONS,
                 ],
                 true
@@ -771,6 +774,7 @@ class LiteSpeedCache extends Module
             $useProductController = $canUseProductRefresh
                 && (
                     $fragment['name'] === LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART
+                    || $fragment['name'] === LiteSpeedCacheDynamicFragment::PRODUCT_ADDITIONAL_INFO
                     || (
                         $fragment['name'] === LiteSpeedCacheDynamicFragment::NOTIFICATIONS
                         && !empty($product)

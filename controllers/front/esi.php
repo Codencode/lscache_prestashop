@@ -233,7 +233,9 @@ class LiteSpeedCacheEsiModuleFrontController extends ModuleFrontController
             }
         }
 
-        // Apply hook-specific parameter fixes for ESI rendering
+        // Apply hook-specific parameter fixes for ESI rendering.
+        // The resolver is also kept as a fallback for themes without the dynamic fragments
+        // introduced in https://github.com/PrestaShop/hummingbird/pull/1101
         $hookParamsResolver = new HookParamsResolver($this->context);
         $hookParamsResolver->resolve($item, $params);
     }

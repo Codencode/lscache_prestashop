@@ -18,6 +18,8 @@ class LiteSpeedCacheDynamicFragment
 {
     const PRODUCT_ADD_TO_CART = 'product-add-to-cart';
     const PRODUCT_ADD_TO_CART_REFRESH = 'product_add_to_cart';
+    const PRODUCT_ADDITIONAL_INFO = 'product-additional-info';
+    const PRODUCT_ADDITIONAL_INFO_REFRESH = 'product_additional_info';
     const NOTIFICATIONS = 'notifications';
 
     public static function isSupported($name)
@@ -31,8 +33,12 @@ class LiteSpeedCacheDynamicFragment
             return null;
         }
 
-        // product-add-to-cart is handled directly by ProductController.
-        if ($name === self::PRODUCT_ADD_TO_CART) {
+        // Product-page fragments rendered by displayAjaxRefresh() are handled
+        // directly by ProductController rather than by the generic ESI controller.
+        if (in_array($name, [
+            self::PRODUCT_ADD_TO_CART,
+            self::PRODUCT_ADDITIONAL_INFO,
+        ], true)) {
             return null;
         }
 
@@ -52,6 +58,7 @@ class LiteSpeedCacheDynamicFragment
     {
         if (!in_array($fragment, [
             self::PRODUCT_ADD_TO_CART,
+            self::PRODUCT_ADDITIONAL_INFO,
             self::NOTIFICATIONS,
         ], true)) {
             return null;
@@ -71,9 +78,7 @@ class LiteSpeedCacheDynamicFragment
             ),
             'ajax' => 1,
             'action' => 'refresh',
-            'lscache_fragment' => $fragment === self::PRODUCT_ADD_TO_CART
-                ? self::PRODUCT_ADD_TO_CART_REFRESH
-                : self::NOTIFICATIONS,
+            'lscache_fragment' => self::getProductRefreshKey($fragment),
         ];
     }
 
@@ -81,8 +86,22 @@ class LiteSpeedCacheDynamicFragment
     {
         return [
             self::PRODUCT_ADD_TO_CART,
+            self::PRODUCT_ADDITIONAL_INFO,
             self::NOTIFICATIONS,
         ];
+    }
+
+    private static function getProductRefreshKey($fragment)
+    {
+        if ($fragment === self::PRODUCT_ADD_TO_CART) {
+            return self::PRODUCT_ADD_TO_CART_REFRESH;
+        }
+
+        if ($fragment === self::PRODUCT_ADDITIONAL_INFO) {
+            return self::PRODUCT_ADDITIONAL_INFO_REFRESH;
+        }
+
+        return self::NOTIFICATIONS;
     }
 
     private static function getProductId($product)
