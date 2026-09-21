@@ -495,6 +495,30 @@ class LiteSpeedCache extends Module
             'info' => $controller->info,
         ];
 
+        /*
+         * displayAjaxRefresh() is reached from Controller::run()'s AJAX path,
+         * which skips FrontController::display() and consequently its protected
+         * prepareNotifications(). Merge and consume only redirect notifications
+         * here, keeping the normal ProductController notification arrays intact.
+         */
+        if (session_status() == PHP_SESSION_NONE) {
+            session_start();
+        }
+
+        if (session_status() == PHP_SESSION_ACTIVE && isset($_SESSION['notifications'])) {
+            $notifications = array_merge_recursive(
+                $notifications,
+                json_decode($_SESSION['notifications'], true)
+            );
+            unset($_SESSION['notifications']);
+        } elseif (isset($_COOKIE['notifications'])) {
+            $notifications = array_merge_recursive(
+                $notifications,
+                json_decode($_COOKIE['notifications'], true)
+            );
+            unset($_COOKIE['notifications']);
+        }
+
         $this->context->smarty->assign(
             'notifications',
             $notifications
@@ -782,9 +806,13 @@ class LiteSpeedCache extends Module
                 );
 
             if ($useProductController) {
+                $inlineContent = $fragment['name'] === LiteSpeedCacheDynamicFragment::NOTIFICATIONS
+                    ? substr($buffer, $fragment['start'], $fragment['length'])
+                    : null;
                 $esiInclude = $this->buildProductRefreshEsiInclude(
                     $product,
-                    $fragment['name']
+                    $fragment['name'],
+                    $inlineContent
                 );
 
                 if ($esiInclude === false || $esiInclude === '') {
@@ -863,7 +891,7 @@ class LiteSpeedCache extends Module
     * The product combination and fragment parameters are passed through
     * getProductLink() so the generated URL follows PrestaShop routing rules.
     */
-    private function buildProductRefreshEsiInclude($product, $fragment)
+    private function buildProductRefreshEsiInclude($product, $fragment, $inlineContent = null)
     {
         $params = LiteSpeedCacheDynamicFragment::buildProductRefreshParam(
             $product,
@@ -905,10 +933,21 @@ class LiteSpeedCache extends Module
             return false;
         }
 
-        return sprintf(
+        $esiInclude = sprintf(
             '<esi:include src=\'%s\' cache-control=\'no-cache\'/>',
             $relativeUrl
         );
+
+        if ($inlineContent !== null) {
+            $esiInclude = sprintf(
+                '<esi:inline name=\'%s\' cache-control=\'no-cache\'>%s</esi:inline>%s',
+                $relativeUrl,
+                trim($inlineContent),
+                $esiInclude
+            );
+        }
+
+        return $esiInclude;
     }
 
     private function registerEsiMarker($params, $conf)

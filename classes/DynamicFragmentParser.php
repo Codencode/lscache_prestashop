@@ -77,6 +77,18 @@ class LiteSpeedCacheDynamicFragmentParser
                 continue;
             }
 
+            /*
+             * A literal '<' does not start an HTML tag unless it is followed
+             * by an ASCII letter, '/', '!' or '?'. In particular, do not let
+             * quotes in normal text (for example "Orders < 50 won't ship")
+             * affect the search for a later '>'.
+             */
+            if (!isset($html[$tagStart + 1])
+                || !preg_match('~[a-zA-Z/!?]~', $html[$tagStart + 1])) {
+                $position = $tagStart + 1;
+                continue;
+            }
+
             $tagEnd = self::findTagEnd($html, $tagStart);
             if ($tagEnd === false) {
                 if ($current !== null) {
@@ -206,7 +218,7 @@ class LiteSpeedCacheDynamicFragmentParser
 
     private static function parseTag($tag)
     {
-        if (!preg_match('~^<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9:_-]*)\b~', $tag, $matches)) {
+        if (!preg_match('~^<(/?)\s*([a-zA-Z][a-zA-Z0-9:_-]*)\b~', $tag, $matches)) {
             return null;
         }
 
