@@ -207,6 +207,25 @@ class LiteSpeedCache extends Module
         self::$ccflag |= self::CCBM_ESI_ON;
     }
 
+    /**
+     * Check whether the current LiteSpeed server supports Combined ESI.
+     *
+     * LiteSpeed exposes the available cache capabilities through X-LSCACHE.
+     * Cache the result for the lifetime of the current PHP request so the
+     * capability string is inspected only once.
+     */
+    private function isCombinedEsiSupported()
+    {
+        static $supported = null;
+
+        if ($supported === null) {
+            $supported = isset($_SERVER['X-LSCACHE'])
+                && stripos($_SERVER['X-LSCACHE'], 'combine') !== false;
+        }
+
+        return $supported;
+    }
+
     private static function myInstance()
     {
         return Module::getInstanceByName(self::MODULE_NAME);
@@ -430,17 +449,21 @@ class LiteSpeedCache extends Module
             return;
         }
 
-        $fragment = Tools::getValue('lscache_fragment');
-
-        if (in_array($fragment, [
-            LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH,
-            LiteSpeedCacheDynamicFragment::PRODUCT_ADDITIONAL_INFO_REFRESH,
-        ], true)) {
-            $content = $this->getProductRefreshFragment($params, $fragment);
-        } elseif ($fragment === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
-            $content = $this->getProductNotificationsFragment();
+        if ((int) Tools::getValue('lscache_combined') === 1) {
+            $content = $this->getCombinedProductRefreshFragments($params);
         } else {
-            return;
+            $fragment = Tools::getValue('lscache_fragment');
+
+            if (in_array($fragment, [
+                LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH,
+                LiteSpeedCacheDynamicFragment::PRODUCT_ADDITIONAL_INFO_REFRESH,
+            ], true)) {
+                $content = $this->getProductRefreshFragment($params, $fragment);
+            } elseif ($fragment === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
+                $content = $this->getProductNotificationsFragment();
+            } else {
+                return;
+            }
         }
 
         if ($content === null) {
@@ -456,6 +479,118 @@ class LiteSpeedCache extends Module
         }
 
         $params['value'] = $content;
+    }
+
+    /**
+     * Return all ProductController-backed dynamic fragments requested by
+     * LiteSpeed Combined ESI from one displayAjaxRefresh() execution.
+     */
+    private function getCombinedProductRefreshFragments($params)
+    {
+        if (empty($params['value'])) {
+            return null;
+        }
+
+        $data = json_decode($params['value'], true);
+        if (!is_array($data)) {
+            return null;
+        }
+
+        $includes = isset($_POST['esi_include']) ? $_POST['esi_include'] : [];
+        if (!is_array($includes)) {
+            $includes = [$includes];
+        }
+
+        if (empty($includes)) {
+            return null;
+        }
+
+        $content = '';
+        $notifications = null;
+        $notificationsRendered = false;
+        $resolved = [];
+
+        foreach ($includes as $includeUrl) {
+            if (!is_string($includeUrl) || $includeUrl === '') {
+                continue;
+            }
+
+            $decodedUrl = html_entity_decode($includeUrl, ENT_QUOTES, 'UTF-8');
+            $queryString = parse_url($decodedUrl, PHP_URL_QUERY);
+
+            if ($queryString === null || $queryString === false) {
+                $resolved[] = [
+                    'url' => $includeUrl,
+                    'fragment' => null,
+                    'status' => 'missing_query',
+                ];
+                continue;
+            }
+
+            $queryParams = [];
+            parse_str($queryString, $queryParams);
+
+            $fragment = isset($queryParams['lscache_fragment'])
+                ? $queryParams['lscache_fragment']
+                : null;
+
+            if (in_array($fragment, [
+                LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH,
+                LiteSpeedCacheDynamicFragment::PRODUCT_ADDITIONAL_INFO_REFRESH,
+            ], true)) {
+                $fragmentContent = isset($data[$fragment])
+                    ? $data[$fragment]
+                    : null;
+            } elseif ($fragment === LiteSpeedCacheDynamicFragment::NOTIFICATIONS) {
+                if (!$notificationsRendered) {
+                    $notifications = $this->getProductNotificationsFragment();
+                    $notificationsRendered = true;
+                }
+
+                $fragmentContent = $notifications;
+            } else {
+                $resolved[] = [
+                    'url' => $includeUrl,
+                    'fragment' => $fragment,
+                    'status' => 'unsupported_fragment',
+                ];
+                continue;
+            }
+
+            if ($fragmentContent === null) {
+                $resolved[] = [
+                    'url' => $includeUrl,
+                    'fragment' => $fragment,
+                    'status' => 'missing_content',
+                ];
+                continue;
+            }
+
+            $inline = sprintf(
+                '<esi:inline name=\'%s\' cache-control=\'no-cache\'>%s</esi:inline>',
+                $includeUrl,
+                trim($fragmentContent)
+            );
+
+            $content .= $inline;
+
+            $resolved[] = [
+                'url' => $includeUrl,
+                'fragment' => $fragment,
+                'status' => 'rendered',
+                'content_length' => strlen($fragmentContent),
+                'inline' => $inline,
+            ];
+        }
+
+        if (_LITESPEED_DEBUG_ >= LiteSpeedCacheLog::LEVEL_ESI_INCLUDE) {
+            LiteSpeedCacheLog::log(
+                __FUNCTION__ . ' combined product refresh includes=' . count($includes),
+                LiteSpeedCacheLog::LEVEL_ESI_INCLUDE
+            );
+        }
+
+        return $content !== '' ? $content : null;
     }
 
     private function getProductRefreshFragment($params, $key)
@@ -579,6 +714,29 @@ class LiteSpeedCache extends Module
             self::$ccflag |= self::CCBM_ESI_REQ;
 
             return 'esi request';
+        }
+
+        if (
+            $controllerClass == 'ProductController'
+            && (int) Tools::getValue('lscache_combined') === 1
+            && (int) Tools::getValue('ajax') === 1
+            && Tools::getValue('action') === 'refresh'
+        ) {
+            /*
+             * Combined ESI collector responses contain esi:inline blocks.
+             *
+             * callbackOutputFilter() always calls setCacheControlHeader(), so the
+             * final LiteSpeed header must be driven by the module flags here.
+             * This results in:
+             *
+             * X-Litespeed-Cache-Control: no-cache,esi=on
+             */
+            self::$ccflag |= self::CCBM_ESI_REQ;
+            self::$ccflag |= self::CCBM_ESI_ON;
+            self::$ccflag |= self::CCBM_NOT_CACHEABLE;
+            self::$no_cache_reason .= 'Combined ESI collector';
+
+            return 'combined product dynamic fragment esi request';
         }
 
         if (
@@ -770,6 +928,41 @@ class LiteSpeedCache extends Module
             && method_exists($this->context->controller, 'displayAjaxRefresh')
         );
 
+        /*
+         * When more than one ProductController-backed fragment is present and
+         * the server advertises Combined ESI support, group them so the backend
+         * executes the ProductController lifecycle only once. Otherwise keep
+         * the existing separate ESI includes as a backward-compatible fallback.
+         */
+        $productRefreshFragmentNames = [
+            LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART,
+            LiteSpeedCacheDynamicFragment::PRODUCT_ADDITIONAL_INFO,
+            LiteSpeedCacheDynamicFragment::NOTIFICATIONS,
+        ];
+        $combinedProductFragments = [];
+
+        if ($canUseProductRefresh && !empty($product)) {
+            foreach ($fragments as $candidate) {
+                if (in_array($candidate['name'], $productRefreshFragmentNames, true)) {
+                    $combinedProductFragments[] = $candidate;
+                }
+            }
+        }
+
+        $useCombinedProductRefresh = count($combinedProductFragments) > 1
+            && $this->isCombinedEsiSupported();
+        $combinedMainStart = null;
+        $combinedMainInclude = null;
+
+        if ($useCombinedProductRefresh) {
+            $combinedMainStart = min(array_column($combinedProductFragments, 'start'));
+            $combinedMainInclude = $this->buildProductCombinedRefreshEsiInclude($product);
+
+            if ($combinedMainInclude === false || $combinedMainInclude === '') {
+                $useCombinedProductRefresh = false;
+            }
+        }
+
         // Replace from the end of the document to the beginning so the offsets
         // returned by the parser remain valid after each substr_replace().
         foreach (array_reverse($fragments) as $fragment) {
@@ -809,10 +1002,15 @@ class LiteSpeedCache extends Module
                 $inlineContent = $fragment['name'] === LiteSpeedCacheDynamicFragment::NOTIFICATIONS
                     ? substr($buffer, $fragment['start'], $fragment['length'])
                     : null;
+
+                $useCombinedSub = $useCombinedProductRefresh
+                    && in_array($fragment['name'], $productRefreshFragmentNames, true);
+
                 $esiInclude = $this->buildProductRefreshEsiInclude(
                     $product,
                     $fragment['name'],
-                    $inlineContent
+                    $inlineContent,
+                    $useCombinedSub
                 );
 
                 if ($esiInclude === false || $esiInclude === '') {
@@ -820,6 +1018,15 @@ class LiteSpeedCache extends Module
                         'Unable to generate dynamic fragment ESI: ' . $fragment['name']
                     );
                     continue;
+                }
+
+                /*
+                 * The main collector must appear before the combined sub-includes.
+                 * Attach it to the earliest ProductController-backed fragment so
+                 * no extra DOM/template change is required for the spike.
+                 */
+                if ($useCombinedSub && $fragment['start'] === $combinedMainStart) {
+                    $esiInclude = $combinedMainInclude . $esiInclude;
                 }
             } else {
                 $esiParam = LiteSpeedCacheDynamicFragment::buildEsiParam($fragment['name']);
@@ -891,7 +1098,12 @@ class LiteSpeedCache extends Module
     * The product combination and fragment parameters are passed through
     * getProductLink() so the generated URL follows PrestaShop routing rules.
     */
-    private function buildProductRefreshEsiInclude($product, $fragment, $inlineContent = null)
+    private function buildProductRefreshEsiInclude(
+        $product,
+        $fragment,
+        $inlineContent = null,
+        $combinedSub = false
+    )
     {
         $params = LiteSpeedCacheDynamicFragment::buildProductRefreshParam(
             $product,
@@ -933,9 +1145,12 @@ class LiteSpeedCache extends Module
             return false;
         }
 
+        $combineAttribute = $combinedSub ? ' combine=\'sub\'' : '';
+
         $esiInclude = sprintf(
-            '<esi:include src=\'%s\' cache-control=\'no-cache\'/>',
-            $relativeUrl
+            '<esi:include src=\'%s\' cache-control=\'no-cache\'%s/>',
+            $relativeUrl,
+            $combineAttribute
         );
 
         if ($inlineContent !== null) {
@@ -948,6 +1163,59 @@ class LiteSpeedCache extends Module
         }
 
         return $esiInclude;
+    }
+
+    /**
+     * Build the Combined ESI main collector include.
+     *
+     * LiteSpeed posts the sub-include URLs to this ProductController refresh
+     * request in $_POST['esi_include'].
+     */
+    private function buildProductCombinedRefreshEsiInclude($product)
+    {
+        $params = LiteSpeedCacheDynamicFragment::buildProductCombinedRefreshParam(
+            $product
+        );
+
+        if ($params == null || empty($params['id_product'])) {
+            return false;
+        }
+
+        $idProduct = (int) $params['id_product'];
+        $idProductAttribute = !empty($params['id_product_attribute'])
+            ? (int) $params['id_product_attribute']
+            : null;
+
+        unset(
+            $params['id_product'],
+            $params['id_product_attribute']
+        );
+
+        $url = $this->context->link->getProductLink(
+            $idProduct,
+            null,
+            null,
+            null,
+            null,
+            null,
+            $idProductAttribute,
+            false,
+            false,
+            false,
+            $params,
+            false
+        );
+
+        $relativeUrl = LiteSpeedCacheHelper::getRelativeUri($url);
+
+        if ($relativeUrl === false) {
+            return false;
+        }
+
+        return sprintf(
+            '<esi:include src=\'%s\' cache-control=\'no-cache\' combine=\'main\'/>',
+            $relativeUrl
+        );
     }
 
     private function registerEsiMarker($params, $conf)

@@ -82,6 +82,29 @@ class LiteSpeedCacheDynamicFragment
         ];
     }
 
+    /**
+     * Build the parameters for the Combined ESI collector request.
+     *
+     * The collector uses the normal ProductController AJAX refresh lifecycle
+     * once, but does not request a single fragment.
+     */
+    public static function buildProductCombinedRefreshParam($product)
+    {
+        $params = self::buildProductRefreshParam(
+            $product,
+            self::PRODUCT_ADD_TO_CART
+        );
+
+        if ($params === null) {
+            return null;
+        }
+
+        unset($params['lscache_fragment']);
+        $params['lscache_combined'] = 1;
+
+        return $params;
+    }
+
     private static function getSupportedNames()
     {
         return [
