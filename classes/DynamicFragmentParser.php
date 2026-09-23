@@ -150,7 +150,7 @@ class LiteSpeedCacheDynamicFragmentParser
                  * first matching closing raw-text tag as the end of the element.
                  */
                 if (in_array($tagName, self::$textElements, true) && !$isSelfClosing) {
-                    $rawCloseStart = stripos($html, '</' . $tagName, $tagEnd + 1);
+                    $rawCloseStart = self::findTextElementClosingTag($html, $tagName, $tagEnd + 1);
                     if ($rawCloseStart !== false) {
                         $rawCloseEnd = self::findTagEnd($html, $rawCloseStart);
                         if ($rawCloseEnd !== false) {
@@ -185,6 +185,42 @@ class LiteSpeedCacheDynamicFragmentParser
         }
 
         return $fragments;
+    }
+
+    /**
+     * Find the matching closing tag for a raw-text/RCDATA element.
+     *
+     * A prefix such as </scripture> must not terminate a <script> element.
+     * After the tag name HTML only allows whitespace, '/', or '>' for a
+     * matching end tag token.
+     */
+    private static function findTextElementClosingTag($html, $tagName, $position)
+    {
+        $needle = '</' . $tagName;
+        $needleLength = strlen($needle);
+        $length = strlen($html);
+
+        while (($candidate = stripos($html, $needle, $position)) !== false) {
+            $delimiterPosition = $candidate + $needleLength;
+
+            if ($delimiterPosition < $length) {
+                $delimiter = $html[$delimiterPosition];
+
+                if ($delimiter === '>'
+                    || $delimiter === '/'
+                    || $delimiter === ' '
+                    || $delimiter === "\t"
+                    || $delimiter === "\n"
+                    || $delimiter === "\f"
+                    || $delimiter === "\r") {
+                    return $candidate;
+                }
+            }
+
+            $position = $delimiterPosition;
+        }
+
+        return false;
     }
 
     /**

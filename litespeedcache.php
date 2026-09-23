@@ -515,24 +515,21 @@ class LiteSpeedCache extends Module
                 continue;
             }
 
-            $decodedUrl = html_entity_decode($includeUrl, ENT_QUOTES, 'UTF-8');
-            $queryString = parse_url($decodedUrl, PHP_URL_QUERY);
+            $include = LiteSpeedCacheDynamicFragment::resolveCombinedInclude(
+                $includeUrl,
+                isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : ''
+            );
 
-            if ($queryString === null || $queryString === false) {
+            if ($include === null) {
                 $resolved[] = [
                     'url' => $includeUrl,
                     'fragment' => null,
-                    'status' => 'missing_query',
+                    'status' => 'invalid_include',
                 ];
                 continue;
             }
 
-            $queryParams = [];
-            parse_str($queryString, $queryParams);
-
-            $fragment = isset($queryParams['lscache_fragment'])
-                ? $queryParams['lscache_fragment']
-                : null;
+            $fragment = $include['fragment'];
 
             if (in_array($fragment, [
                 LiteSpeedCacheDynamicFragment::PRODUCT_ADD_TO_CART_REFRESH,
@@ -568,7 +565,7 @@ class LiteSpeedCache extends Module
 
             $inline = sprintf(
                 '<esi:inline name=\'%s\' cache-control=\'no-cache\'>%s</esi:inline>',
-                $includeUrl,
+                $include['url'],
                 trim($fragmentContent)
             );
 
@@ -1119,10 +1116,11 @@ class LiteSpeedCache extends Module
             ? (int) $params['id_product_attribute']
             : null;
 
-        unset(
-            $params['id_product'],
-            $params['id_product_attribute']
-        );
+        unset($params['id_product']);
+
+        if ($idProductAttribute === null) {
+            unset($params['id_product_attribute']);
+        }
 
         $url = $this->context->link->getProductLink(
             $idProduct,
@@ -1186,10 +1184,11 @@ class LiteSpeedCache extends Module
             ? (int) $params['id_product_attribute']
             : null;
 
-        unset(
-            $params['id_product'],
-            $params['id_product_attribute']
-        );
+        unset($params['id_product']);
+
+        if ($idProductAttribute === null) {
+            unset($params['id_product_attribute']);
+        }
 
         $url = $this->context->link->getProductLink(
             $idProduct,
