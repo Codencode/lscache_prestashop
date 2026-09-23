@@ -30,7 +30,6 @@ class LscDynamicFragment extends LscIntegration
         $this->esiConf = new EsiConf(self::NAME, EsiConf::TYPE_BUILTIN, $confData);
 
         $this->registerEsiModule();
-        LiteSpeedCacheConfig::getInstance()->overrideGuestMode();
 
         return true;
     }
